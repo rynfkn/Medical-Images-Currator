@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     data_dir: Path = Path("data/datasets")
     import_dir: Path = Path("data/import")
     max_upload_bytes: int = Field(default=1024 * 1024 * 1024, gt=0)
+    cors_origins: list[str] = Field(default_factory=list)
 
 
 @lru_cache

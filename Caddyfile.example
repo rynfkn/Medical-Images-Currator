@@ -1,0 +1,4 @@
+# Install Caddy on the same host as Docker and replace this example domain.
+api.example.com {
+    reverse_proxy 127.0.0.1:8000
+}

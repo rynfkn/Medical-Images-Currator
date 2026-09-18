@@ -3,6 +3,9 @@
 FastAPI, SQLAlchemy 2, PostgreSQL, and local files. Supports NIfTI images and masks,
 PNG/JPEG with COCO annotations, and basic single-frame DICOM series. No frontend.
 
+For internet access, HTTPS, frontend CORS settings, and remote SQL access, see
+[DEPLOYMENT.md](DEPLOYMENT.md).
+
 ## Start with Docker Compose
 
 Run from `backend/`:
