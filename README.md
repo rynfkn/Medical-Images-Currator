@@ -12,7 +12,7 @@ cp .env.example .env
 python3 -c 'import secrets; print(secrets.token_hex(32))'
 # Put the generated value in JWT_SECRET in .env.
 mkdir -p data/import data/datasets
-docker compose up --build
+  docker compose up --build
 ```
 
 The backend waits for PostgreSQL and runs `alembic upgrade head` before starting.
@@ -103,13 +103,33 @@ Supported combinations:
 **NIfTI:** put matched `.nii.gz` or `.nii` filenames in `images/` and `labels/`,
 such as `images/case_0001.nii.gz` and `labels/case_0001.nii.gz`. Files remain NIfTI.
 Validation checks readable 3D payloads, identical image/mask shapes, and finite
-integer mask labels. Floating-point labels within an absolute tolerance of `1e-6`
-of an integer are accepted to allow small numerical errors. Metadata label IDs
-are rounded to the nearest integer; source and stored annotation files remain
-byte-for-byte unchanged. Genuine fractional values, NaN, and infinity are rejected.
+integer mask labels. Floating-point storage uses an absolute tolerance of `1e-6`
+from the nearest integer. For integer storage with a nonzero absolute scaling
+step below 1, the tolerance is the larger of `1e-6` and half the scaling step plus
+`1e-6`. This allows integer classes encoded with different quantization steps,
+including scaled int16 labels decoding to `1.0000152587890625`, without a fixed
+`1e-4` cap. Scaling steps of 1 or larger retain the strict `1e-6` tolerance;
+half-integer values are always rejected because their nearest class is ambiguous.
+Relative tolerance is zero. This assumes the input represents categorical integer
+labels: the header alone cannot establish the intended meaning of voxel values.
+Values outside the encoding tolerance, NaN, and infinity are rejected. Metadata
+label IDs are rounded to the nearest integer; source and stored annotation files
+remain byte-for-byte unchanged.
 Metadata includes shape, voxel spacing, affine, and labels.
 Shape agreement does not establish that a mask is anatomically aligned; spatial
 registration is outside this MVP.
+
+Check every NIfTI pair before importing a large dataset:
+
+```bash
+docker compose exec backend python -m app.validate_nifti /app/data/import/RCC-AID
+```
+
+This read-only command uses the same file validation as ingestion and reports all
+failing cases together, including filenames. It exits with status 0 when all pairs
+pass, or 1 when validation fails. It does not create records or modify files.
+It does not check existing database case IDs, disk capacity, or anatomical alignment;
+ingestion still validates the files again and may fail if those conditions change.
 
 **COCO:** put PNG/JPEG files in `images/` and the full COCO file at
 `annotations/instances.json`. Create a 2D/PNG/COCO (or 2D/JPEG/COCO) dataset and ingest:

@@ -36,10 +36,15 @@ def add_original(db: Session, case: Case, path: str, format: AnnotationFormat, u
     db.flush()
 
 
-def ingest_nifti_dataset(db: Session, dataset: Dataset, root: Path, user: User) -> int:
+def nifti_images(root: Path) -> list[Path]:
     images = sorted(p for p in (root / "images").glob("*") if p.name.endswith((".nii", ".nii.gz")))
     if not images:
         raise ValueError("No NIfTI images found in images/")
+    return images
+
+
+def ingest_nifti_dataset(db: Session, dataset: Dataset, root: Path, user: User) -> int:
+    images = nifti_images(root)
     for image in images:
         image = source_file(root, f"images/{image.name}")
         mask = source_file(root, f"labels/{image.name}")

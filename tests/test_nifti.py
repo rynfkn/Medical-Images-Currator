@@ -59,7 +59,8 @@ def test_invalid_labels_rejected(env, mask_value):
     assert not list(settings.data_dir.rglob("*.nii.gz"))
 
 
-def test_near_integer_labels_preserve_files_and_correct_metadata(env):
+@pytest.mark.parametrize("storage", ["float64", "int16", "uint8"])
+def test_near_integer_labels_preserve_files_and_correct_metadata(env, storage):
     client, settings, users, _ = env
     root = settings.import_dir / "nifti"
     nifti_input(root)
@@ -78,13 +79,25 @@ def test_near_integer_labels_preserve_files_and_correct_metadata(env):
         (4, 5, 6),
     )
     mask_path = root / "labels/case_0001.nii.gz"
-    nib.save(nib.Nifti1Image(values, np.eye(4)), mask_path)
+    mask = nib.Nifti1Image(values, np.eye(4))
+    if storage == "int16":
+        # Reproduce case_0039's actual storage and header, not just loaded floats.
+        raw = np.resize(np.array([-32768, 0, 32767], dtype=np.int16), (4, 5, 6))
+        mask = nib.Nifti1Image(raw, np.eye(4))
+        mask.header.set_slope_inter(3.051804378628731e-05, 1.0000152587890625)
+    elif storage == "uint8":
+        # Coarser integer encoding still represents classes 0, 1, 2; its error
+        # exceeds the former fixed 1e-4 cap but fits half the encoding step.
+        raw = np.resize(np.array([0, 127, 255], dtype=np.uint8), (4, 5, 6))
+        mask = nib.Nifti1Image(raw, np.eye(4))
+        mask.header.set_slope_inter(2 / 255, 0)
+    nib.save(mask, mask_path)
     original = mask_path.read_bytes()
     dataset_id = create_dataset(client, users["admin"])
     response = ingest(client, users["admin"], dataset_id, root)
     assert response.status_code == 201, response.text
     case = client.get(f"/api/v1/datasets/{dataset_id}/cases", headers=users["doctor"]).json()[0]
-    assert case["metadata"]["labels"] == [0, 1, 2, 3]
+    assert case["metadata"]["labels"] == ([0, 1, 2, 3] if storage == "float64" else [0, 1, 2])
     assert mask_path.read_bytes() == original
     assert client.get(case["annotation_url"], headers=users["doctor"]).content == original
 
@@ -98,6 +111,28 @@ def test_near_integer_labels_preserve_files_and_correct_metadata(env):
     assert response.json()["version"] == 1
     assert client.get(response.json()["url"], headers=users["doctor"]).content == original
     assert client.get(case["annotation_url"], headers=users["doctor"]).content == original
+
+
+@pytest.mark.parametrize(
+    "slope,intercept,raw_value",
+    [
+        (0.5, 0, 3),  # Loaded value 1.5 must not pass a half-step allowance.
+        (1, 0.25, 1),  # An offset does not make a fractional label acceptable.
+        (0.001, 1.0006, 0),  # Beyond half the actual encoding step.
+        (0.999999, 0.5, 0),  # Epsilon must not cause an ambiguous midpoint to pass.
+    ],
+)
+def test_coarse_integer_scaling_rejected(env, slope, intercept, raw_value):
+    client, settings, users, _ = env
+    root = settings.import_dir / "nifti"
+    nifti_input(root)
+    mask = nib.Nifti1Image(np.full((4, 5, 6), raw_value, dtype=np.int16), np.eye(4))
+    mask.header.set_slope_inter(slope, intercept)
+    nib.save(mask, root / "labels/case_0001.nii.gz")
+    dataset_id = create_dataset(client, users["admin"])
+    response = ingest(client, users["admin"], dataset_id, root)
+    assert response.status_code == 422
+    assert not list(settings.data_dir.rglob("*.nii.gz"))
 
 
 def test_later_ingestion_failure_rolls_back_all_cases(env):

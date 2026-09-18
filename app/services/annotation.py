@@ -32,11 +32,24 @@ def nifti_metadata(image_path: Path, mask_path: Path) -> dict:
             raise ValueError("Segmentation labels must be finite integers")
         labels = np.unique(values)
         if not np.issubdtype(labels.dtype, np.integer):
+            tolerance = NIFTI_LABEL_TOLERANCE
+            if np.issubdtype(mask.get_data_dtype(), np.integer):
+                # A decoded value may differ from its integer class by half a
+                # storage step. The step must resolve adjacent integer classes.
+                # NiBabel consumes header scaling on load; read the array proxy.
+                step = abs(float(mask.dataobj.slope))
+                if 0 < step < 1:
+                    tolerance = max(tolerance, step / 2 + NIFTI_LABEL_TOLERANCE)
             rounded_labels = np.rint(labels)
-            if not np.allclose(labels, rounded_labels, rtol=0, atol=NIFTI_LABEL_TOLERANCE):
+            deviations = np.abs(labels - rounded_labels)
+            # Never resolve an ambiguous half-integer by rounding it arbitrarily.
+            if np.any(deviations >= 0.5) or not np.allclose(
+                labels, rounded_labels, rtol=0, atol=tolerance
+            ):
+                deviation = float(np.max(deviations))
                 raise ValueError(
                     "Segmentation labels must be finite integers "
-                    f"(allowed numerical error: {NIFTI_LABEL_TOLERANCE:g})"
+                    f"(maximum deviation: {deviation:g}; allowed numerical error: {tolerance:g})"
                 )
             # Normalize metadata only; keep the source and stored mask bytes intact.
             labels = np.unique(rounded_labels)
