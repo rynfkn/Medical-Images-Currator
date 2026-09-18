@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "medical-data-curator"
+version = "0.1.0"
+description = "Medical segmentation dataset curation backend"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.121,<1", "uvicorn[standard]>=0.34,<1",
+  "SQLAlchemy>=2.0,<2.1", "psycopg[binary]>=3.2,<4", "alembic>=1.14,<2",
+  "pydantic>=2.10,<3", "pydantic-settings>=2.7,<3",
+  "PyJWT>=2.10,<3", "pwdlib[argon2]>=0.2,<1", "python-multipart>=0.0.20,<1",
+  "nibabel>=5.3,<6", "pydicom>=3,<4", "pycocotools>=2.0.8,<3",
+  "Pillow>=11,<13", "numpy>=2,<3",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10", "httpx>=0.28,<1", "ruff>=0.11,<1"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]

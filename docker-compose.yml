@@ -1,0 +1,38 @@
+services:
+  backend:
+    build: .
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg://curator:${POSTGRES_PASSWORD:-curator}@postgres:5432/curator
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env to a random secret of at least 32 characters}
+      ACCESS_TOKEN_MINUTES: ${ACCESS_TOKEN_MINUTES:-480}
+      DATA_DIR: /app/data/datasets
+      IMPORT_DIR: /app/data/import
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-1073741824}
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: curator
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-curator}
+      POSTGRES_DB: curator
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U curator -d curator"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
