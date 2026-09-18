@@ -43,6 +43,32 @@ def create_review(case_id: UUID, body: ReviewCreate, db: Db, user: CurrentUser):
     return review
 
 
+@router.patch("/reviews/{review_id}", response_model=ReviewOut)
+def update_review(review_id: UUID, body: ReviewCreate, db: Db, user: CurrentUser):
+    """Save an open draft's decision and comment; submitted reviews stay immutable."""
+    review = db.get(Review, review_id)
+    if not review:
+        raise HTTPException(404, "Review not found")
+    case = require_case(db, review.case_id, lock=True)
+    db.refresh(review)
+    if review.reviewer_id != user.id:
+        raise HTTPException(403, "Only the review author can edit it")
+    if review.submitted_at:
+        raise HTTPException(409, "Review already submitted")
+    annotation = (
+        db.get(AnnotationVersion, body.annotation_version_id)
+        if body.annotation_version_id
+        else current_annotation(db, case.id)
+    )
+    if body.annotation_version_id and (not annotation or annotation.case_id != case.id):
+        raise HTTPException(422, "Annotation does not belong to this case")
+    review.decision = body.decision
+    review.comment = body.comment
+    review.annotation_version_id = annotation.id if annotation else None
+    db.flush()
+    return review
+
+
 @router.get("/cases/{case_id}/reviews", response_model=list[ReviewOut])
 def list_reviews(case_id: UUID, db: Db, user: CurrentUser):
     require_case(db, case_id)

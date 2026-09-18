@@ -42,3 +42,13 @@ def annotation_file(annotation_id: UUID, db: Db, user: CurrentUser):
     if not annotation:
         raise HTTPException(404, "Annotation not found")
     return file_response(annotation.annotation_path)
+
+
+@router.get("/annotations/{annotation_id}/labels")
+def annotation_labels(annotation_id: UUID, db: Db, user: CurrentUser):
+    annotation = db.get(AnnotationVersion, annotation_id)
+    if not annotation:
+        raise HTTPException(404, "Annotation not found")
+    return file_response(
+        f"{annotation.annotation_path.rsplit('/', 1)[0]}/labels.json", "application/json"
+    )

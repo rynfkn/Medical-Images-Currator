@@ -1,0 +1,10 @@
+# Development overlay: mount the application source so backend changes only need
+# `docker compose ... restart backend` instead of an image rebuild.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+services:
+  backend:
+    volumes:
+      - ./data:/app/data
+      - ./app:/app/app
+      - ./tests:/app/tests
+      - ./pyproject.toml:/app/pyproject.toml

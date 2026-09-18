@@ -139,9 +139,27 @@ def test_later_ingestion_failure_rolls_back_all_cases(env):
     client, settings, users, _ = env
     root = settings.import_dir / "nifti"
     nifti_input(root)
-    # The first case is valid; the later image has no corresponding label.
+    # The first case is valid; the later one has a label that does not fit its image.
     (root / "images/case_0002.nii.gz").write_bytes((root / "images/case_0001.nii.gz").read_bytes())
+    nib.save(
+        nib.Nifti1Image(np.zeros((2, 3, 4), dtype=np.uint8), np.eye(4)),
+        root / "labels/case_0002.nii.gz",
+    )
     dataset_id = create_dataset(client, users["admin"])
     assert ingest(client, users["admin"], dataset_id, root).status_code == 422
     assert client.get(f"/api/v1/datasets/{dataset_id}/cases", headers=users["admin"]).json() == []
     assert not list(settings.data_dir.rglob("*.nii.gz"))
+
+
+def test_image_without_a_label_is_ingested_unsegmented(env):
+    client, settings, users, _ = env
+    root = settings.import_dir / "nifti"
+    nifti_input(root)
+    (root / "images/case_0002.nii.gz").write_bytes((root / "images/case_0001.nii.gz").read_bytes())
+    dataset_id = create_dataset(client, users["admin"])
+    assert ingest(client, users["admin"], dataset_id, root).status_code == 201
+    cases = client.get(f"/api/v1/datasets/{dataset_id}/cases", headers=users["doctor"]).json()
+    annotated = {case["case_uid"]: case["current_annotation"] for case in cases}
+    assert annotated["case_0001"]["version"] == 0
+    assert annotated["case_0002"] is None
+    assert cases[1]["metadata"]["labels"] == []

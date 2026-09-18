@@ -44,22 +44,39 @@ def nifti_images(root: Path) -> list[Path]:
 
 
 def ingest_nifti_dataset(db: Session, dataset: Dataset, root: Path, user: User) -> int:
+    """Ingest images with matching labels; images without one start unsegmented."""
     images = nifti_images(root)
     for image in images:
-        image = source_file(root, f"images/{image.name}")
-        mask = source_file(root, f"labels/{image.name}")
-        suffix = ".nii.gz" if image.name.endswith(".nii.gz") else ".nii"
-        case = new_case(db, dataset, image.name.removesuffix(suffix))
+        name = image.name
+        image = source_file(root, f"images/{name}")
+        label = root / "labels" / name
+        # A dangling or escaping symlink must be rejected, not silently skipped.
+        labelled = label.exists() or label.is_symlink()
+        suffix = ".nii.gz" if name.endswith(".nii.gz") else ".nii"
+        case = new_case(db, dataset, name.removesuffix(suffix))
         base = case_directory(dataset, case)
         case.image_path = copy_file(db, image, f"{base}/image/image{suffix}")
-        annotation_path = copy_file(db, mask, f"{base}/annotations/v0/segmentation{suffix}")
+        annotation_path = (
+            copy_file(
+                db,
+                source_file(root, f"labels/{name}"),
+                f"{base}/annotations/v0/segmentation{suffix}",
+            )
+            if labelled
+            else None
+        )
         try:
             case.metadata_json = nifti_metadata(
-                get_file_path(case.image_path), get_file_path(annotation_path)
+                get_file_path(case.image_path),
+                get_file_path(annotation_path) if annotation_path else None,
             )
         except ValueError as exc:
-            raise ValueError(f"{image.name}: {exc}") from exc
-        add_original(db, case, annotation_path, AnnotationFormat.NIFTI, user)
+            raise ValueError(f"{name}: {exc}") from exc
+        if annotation_path:
+            add_original(db, case, annotation_path, AnnotationFormat.NIFTI, user)
+        else:
+            db.add(case)
+            db.flush()
     return len(images)
 
 

@@ -1,7 +1,9 @@
 # Medical dataset curation backend
 
 FastAPI, SQLAlchemy 2, PostgreSQL, and local files. Supports NIfTI images and masks,
-PNG/JPEG with COCO annotations, and basic single-frame DICOM series. No frontend.
+PNG/JPEG with COCO annotations, and single-frame DICOM series. Besides curation it
+serves the viewer API the frontend draws with: windowed image slices, segmentation
+slices, in-place brush editing, and saving the result back in the case's own format.
 
 For internet access, HTTPS, frontend CORS settings, and remote SQL access, see
 [DEPLOYMENT.md](DEPLOYMENT.md).
@@ -102,9 +104,16 @@ Supported combinations:
 | NIfTI | 3D | NIFTI | NIFTI | NIFTI |
 | COCO + PNG/JPEG | 2D | PNG or JPEG | COCO | COCO |
 | DICOM | 3D | DICOM | NONE | DICOM |
+| DICOM to be segmented | 3D | DICOM | NIFTI | DICOM |
+
+A `DICOM`/`NIFTI` dataset is viewed like any other series but can also receive a
+segmentation, which is stored as NIfTI in the series geometry.
 
 **NIfTI:** put matched `.nii.gz` or `.nii` filenames in `images/` and `labels/`,
 such as `images/case_0001.nii.gz` and `labels/case_0001.nii.gz`. Files remain NIfTI.
+`labels/` is optional: an image with no matching mask is ingested unsegmented, and
+its first segmentation is created in the viewer and saved as `v1`, leaving `v0`
+reserved for an original the case never had.
 Validation checks readable 3D payloads, identical image/mask shapes, and finite
 integer mask labels. Floating-point storage uses an absolute tolerance of `1e-6`
 from the nearest integer. For integer storage with a nonzero absolute scaling
@@ -162,6 +171,15 @@ slice normal when consistent orientation/position data exists, otherwise by
 modality, description, geometry, and per-slice metadata. `image_urls` lists protected
 slice downloads in that order. No pixel decoding, conversion, DICOM segmentation,
 or multi-frame support is provided.
+
+**Uploading from a browser:** `POST /api/v1/datasets/{id}/upload` takes the files
+themselves as multipart form fields — `images` (repeatable), `labels` (repeatable,
+NIfTI masks matched to images by file name), and `annotations` (a COCO
+`instances.json`) — instead of a server path. Uploads are staged in a throwaway
+directory under `IMPORT_DIR`, ingested with the same validation as a path ingest,
+and the staged copy is removed whether it succeeded or not. File names are reduced
+to their leaf, so nothing can be written outside the staging directory, and each
+file is capped at `MAX_UPLOAD_BYTES`. Administrators only, like the path ingest.
 
 An ingest request is all-or-nothing. Duplicate case identifiers within a dataset
 are rejected. Additional distinct cases can be ingested later. A failed request
@@ -236,6 +254,46 @@ List versions at `GET /api/v1/cases/{id}/annotations`, get the current version a
 `GET /api/v1/cases/{id}/reviews`. File routes accept record IDs or slice indices,
 never user-supplied filesystem paths.
 
+## Viewer and segmentation editing
+
+The frontend never downloads a whole volume. On first use each case is decoded once
+into an uncompressed, RAS-oriented cache under `DATA_DIR` (`<case>/viewer/`), which
+is then read through memory maps, so a slice costs one small PNG instead of a
+multi-hundred-megabyte transfer. NIfTI, DICOM series, and PNG/JPEG all reduce to the
+same 3D label space, where a 2D image is a volume with one slice. The cache is
+uncompressed: expect roughly two bytes per voxel per case on disk. It is rebuilt
+automatically when missing and is safe to delete.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/v1/viewer/cases/{id}` | Geometry, spacing, default window, label names, draft state |
+| `GET /api/v1/viewer/cases/{id}/slice/{axis}/{index}?level=&width=` | Windowed image slice as PNG |
+| `GET /api/v1/viewer/cases/{id}/mask/{axis}/{index}` | Segmentation slice as PNG, label IDs as pixel values |
+| `POST /api/v1/viewer/cases/{id}/paint/{axis}/{index}` | Apply one edited slice (PNG body, label IDs in the red channel) |
+| `POST /api/v1/viewer/cases/{id}/save` | Commit the edits as a new annotation version |
+| `POST /api/v1/viewer/cases/{id}/discard` | Throw the edits away |
+| `POST /api/v1/viewer/cases/{id}/labels` | Name the numeric label values |
+| `GET /api/v1/files/annotations/{id}/labels` | The label mapping saved beside a mask |
+
+Axis `0` is sagittal, `1` coronal, `2` axial, all in RAS order; slices are returned
+in radiological display orientation (patient left on the right of the image).
+
+Painting does **not** create an annotation version. Each stroke is applied to a
+private working copy of the label volume under `<case>/work/<user id>/`, so unsaved
+work survives a reload and is invisible to other reviewers. `save` writes the
+working copy through the same validation as an uploaded correction — a NIfTI mask
+keeps the source image's shape, affine, and header; a COCO case is re-encoded as one
+RLE annotation per category — and then removes the working copy. `discard` removes
+it without writing anything. Because the copy is server-side, an interrupted session
+loses nothing, but the files are only cleaned up by `save` or `discard`.
+
+Label names are stored on the case and written next to each saved NIfTI mask as
+`labels.json` (`{"labels": {"1": "Kidney", "2": "Tumor"}}`), because a NIfTI mask can
+only carry numbers. For COCO the names go into the exported `categories`.
+
+`PATCH /api/v1/reviews/{review_id}` updates an open draft's decision and comment
+using the same JSON schema as creating one; submitted reviews stay immutable.
+
 ## Tests
 
 ```bash
@@ -248,6 +306,17 @@ ruff format --check .
 The default suite uses isolated SQLite databases and generated images. It covers
 NIfTI/COCO validation, original preservation, review decisions, file/auth boundaries,
 DICOM ordering, and rollback after invalid uploads or simulated commit failure.
+`tests/test_viewer.py` covers the viewer: RAS geometry from an oblique affine, the
+slice/insert round trip, painting a mask that keeps the source image's shape and
+affine, segmenting an image that arrived without labels, discarding a draft, label
+names and their sidecar file, and a DICOM series with real pixel data.
+
+During development, mount the sources instead of rebuilding the image on each change:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.dev.yml exec backend pytest -q
+```
 
 To also test real PostgreSQL locking, use a **disposable** database:
 

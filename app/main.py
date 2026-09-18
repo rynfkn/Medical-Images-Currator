@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 
-from app.api import annotations, auth, cases, datasets, files, reviews
+from app.api import annotations, auth, cases, datasets, files, reviews, viewer
 from app.core.config import get_settings
 
 app = FastAPI(title="Medical Dataset Curation", version="0.1.0")
@@ -11,7 +11,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().cors_origins,
     allow_credentials=False,  # Authentication uses explicit bearer headers, not cookies.
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "Range"],
     expose_headers=["Content-Disposition", "Content-Length", "Content-Range", "Accept-Ranges"],
 )
@@ -22,6 +22,7 @@ for router in (
     annotations.router,
     reviews.router,
     files.router,
+    viewer.router,
 ):
     app.include_router(router, prefix="/api/v1")
 

@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.core.security import CurrentUser
 from app.db import Db
 from app.models import AnnotationVersion, Case, CaseStatus, Dataset, ImageFormat
-from app.schemas import AnnotationOut, CaseOut
+from app.schemas import AnnotationOut, CaseOut, CaseSummary
 
 router = APIRouter(tags=["cases"])
 
@@ -89,3 +89,13 @@ def list_cases(
 @router.get("/cases/{case_id}", response_model=CaseOut)
 def get_case(case_id: UUID, db: Db, user: CurrentUser):
     return case_out(db, require_case(db, case_id))
+
+
+@router.get("/datasets/{dataset_id}/cases/index", response_model=list[CaseSummary])
+def case_index(dataset_id: UUID, db: Db, user: CurrentUser):
+    """Every case ID in display order, so the viewer can step through the dataset."""
+    if db.get(Dataset, dataset_id) is None:
+        raise HTTPException(404, "Dataset not found")
+    return db.scalars(
+        select(Case).where(Case.dataset_id == dataset_id).order_by(Case.case_uid, Case.id)
+    ).all()

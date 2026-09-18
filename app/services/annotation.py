@@ -10,23 +10,36 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.models import AnnotationFormat, AnnotationVersion, Case, CaseStatus, Review, User
+from app.models import (
+    AnnotationFormat,
+    AnnotationVersion,
+    Case,
+    CaseStatus,
+    Dataset,
+    ImageFormat,
+    Review,
+    User,
+)
 from app.services.storage import get_file_path, save_file
 
 # Absolute tolerance only: larger label IDs must not permit larger fractions.
 NIFTI_LABEL_TOLERANCE = 1e-6
 
 
-def nifti_metadata(image_path: Path, mask_path: Path) -> dict:
+def nifti_metadata(image_path: Path, mask_path: Path | None = None) -> dict:
+    """Validate a NIfTI image, and its segmentation when the case has one."""
     try:
         image = nib.load(image_path)
-        mask = nib.load(mask_path)
         if len(image.shape) != 3:
             raise ValueError("Expected a 3D NIfTI image")
+        # Read the payload, not only the header, to catch truncated files.
+        np.asanyarray(image.dataobj)
+        labels = np.array([], dtype=np.int64)
+        if mask_path is None:
+            return nifti_geometry(image, labels)
+        mask = nib.load(mask_path)
         if image.shape != mask.shape:
             raise ValueError("NIfTI image and segmentation shapes must match")
-        # Read both payloads, not only their headers, to catch truncated files.
-        np.asanyarray(image.dataobj)
         values = np.asanyarray(mask.dataobj)
         if not np.isfinite(values).all():
             raise ValueError("Segmentation labels must be finite integers")
@@ -53,19 +66,23 @@ def nifti_metadata(image_path: Path, mask_path: Path) -> dict:
                 )
             # Normalize metadata only; keep the source and stored mask bytes intact.
             labels = np.unique(rounded_labels)
-        if not np.isfinite(image.affine).all():
-            raise ValueError("NIfTI affine must be finite")
-        spacing = [float(x) for x in image.header.get_zooms()[:3]]
-        if any(not np.isfinite(x) or x <= 0 for x in spacing):
-            raise ValueError("NIfTI spacing must be positive and finite")
-        return {
-            "shape": list(image.shape),
-            "spacing": spacing,
-            "affine": image.affine.tolist(),
-            "labels": [int(x) for x in labels],
-        }
+        return nifti_geometry(image, labels)
     except (OSError, EOFError, nib.filebasedimages.ImageFileError) as exc:
         raise ValueError("Unreadable NIfTI file") from exc
+
+
+def nifti_geometry(image, labels) -> dict:
+    if not np.isfinite(image.affine).all():
+        raise ValueError("NIfTI affine must be finite")
+    spacing = [float(x) for x in image.header.get_zooms()[:3]]
+    if any(not np.isfinite(x) or x <= 0 for x in spacing):
+        raise ValueError("NIfTI spacing must be positive and finite")
+    return {
+        "shape": list(image.shape),
+        "spacing": spacing,
+        "affine": image.affine.tolist(),
+        "labels": [int(x) for x in labels],
+    }
 
 
 def create_correction(db: Session, case: Case, user: User, upload: UploadFile) -> AnnotationVersion:
@@ -81,20 +98,30 @@ def create_correction(db: Session, case: Case, user: User, upload: UploadFile) -
         .order_by(AnnotationVersion.version.desc())
         .limit(1)
     )
-    if parent is None or parent.format not in (AnnotationFormat.NIFTI, AnnotationFormat.COCO):
+    dataset = db.get(Dataset, case.dataset_id)
+    # A case ingested without a segmentation gets its first mask as v1, keeping v0
+    # reserved for an original that this case never had.
+    target = parent.format if parent else dataset.annotation_format
+    if target not in (AnnotationFormat.NIFTI, AnnotationFormat.COCO):
         raise HTTPException(422, "This case does not support segmentation corrections")
+    if parent is None and target == AnnotationFormat.COCO:
+        raise HTTPException(422, "COCO corrections need the original annotation")
     filename = upload.filename or ""
-    if parent.format == AnnotationFormat.NIFTI and not filename.endswith((".nii", ".nii.gz")):
+    if target == AnnotationFormat.NIFTI and not filename.endswith((".nii", ".nii.gz")):
         raise HTTPException(422, "Upload a .nii or .nii.gz segmentation")
     suffix = ".nii.gz" if filename.endswith(".nii.gz") else ".nii"
-    if parent.format == AnnotationFormat.COCO:
+    if target == AnnotationFormat.COCO:
         suffix = ".json"
-    version = parent.version + 1
+    version = parent.version + 1 if parent else 1
     path = f"{case.dataset_id}/cases/{case.id}/annotations/v{version}/segmentation{suffix}"
     save_file(db, upload.file, path, max_bytes=get_settings().max_upload_bytes)
     try:
-        if parent.format == AnnotationFormat.NIFTI:
-            nifti_metadata(get_file_path(case.image_path), get_file_path(path))
+        if target == AnnotationFormat.NIFTI:
+            # A DICOM case has no single image file to check the mask against.
+            if dataset.image_format == ImageFormat.NIFTI:
+                nifti_metadata(get_file_path(case.image_path), get_file_path(path))
+            else:
+                nifti_metadata(get_file_path(path))
         else:
             original = read_json(get_file_path(parent.annotation_path))
             corrected = read_json(get_file_path(path))
@@ -104,9 +131,9 @@ def create_correction(db: Session, case: Case, user: User, upload: UploadFile) -
     annotation = AnnotationVersion(
         case_id=case.id,
         version=version,
-        parent_id=parent.id,
+        parent_id=parent.id if parent else None,
         annotation_path=path,
-        format=parent.format,
+        format=target,
         created_by=user.id,
     )
     db.add(annotation)

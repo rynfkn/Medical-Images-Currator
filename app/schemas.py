@@ -36,6 +36,7 @@ class DatasetCreate(BaseModel):
         supported = {
             (Dimension.THREE_D, ImageFormat.NIFTI, AnnotationFormat.NIFTI),
             (Dimension.THREE_D, ImageFormat.DICOM, AnnotationFormat.NONE),
+            (Dimension.THREE_D, ImageFormat.DICOM, AnnotationFormat.NIFTI),
             (Dimension.TWO_D, ImageFormat.PNG, AnnotationFormat.COCO),
             (Dimension.TWO_D, ImageFormat.JPEG, AnnotationFormat.COCO),
         }
@@ -98,3 +99,46 @@ class ReviewOut(ORMModel):
     comment: str | None
     created_at: datetime
     submitted_at: datetime | None
+
+
+class ViewerAxis(BaseModel):
+    index: int
+    name: str
+    count: int
+    rows: int
+    columns: int
+    row_mm: float
+    column_mm: float
+
+
+class ViewerLabel(BaseModel):
+    value: int = Field(ge=1, le=255)
+    name: str = Field(min_length=1, max_length=60)
+
+
+class LabelNames(BaseModel):
+    """Names for the numeric label values stored in the segmentation mask."""
+
+    labels: list[ViewerLabel] = Field(max_length=255)
+
+
+class ViewerInfo(BaseModel):
+    shape: list[int]
+    spacing: list[float]
+    axes: list[ViewerAxis]
+    level: float
+    width: float
+    range: list[int]
+    labels: list[ViewerLabel]
+    annotation_format: AnnotationFormat
+    editable: bool
+    has_mask: bool
+    has_draft: bool
+    draft: dict | None
+    current_annotation: AnnotationOut | None
+
+
+class CaseSummary(ORMModel):
+    id: uuid.UUID
+    case_uid: str
+    status: CaseStatus
