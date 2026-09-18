@@ -13,6 +13,9 @@ from app.core.config import get_settings
 from app.models import AnnotationFormat, AnnotationVersion, Case, CaseStatus, Review, User
 from app.services.storage import get_file_path, save_file
 
+# Absolute tolerance only: larger label IDs must not permit larger fractions.
+NIFTI_LABEL_TOLERANCE = 1e-6
+
 
 def nifti_metadata(image_path: Path, mask_path: Path) -> dict:
     try:
@@ -25,8 +28,18 @@ def nifti_metadata(image_path: Path, mask_path: Path) -> dict:
         # Read both payloads, not only their headers, to catch truncated files.
         np.asanyarray(image.dataobj)
         values = np.asanyarray(mask.dataobj)
-        if not np.isfinite(values).all() or not np.equal(values, np.floor(values)).all():
+        if not np.isfinite(values).all():
             raise ValueError("Segmentation labels must be finite integers")
+        labels = np.unique(values)
+        if not np.issubdtype(labels.dtype, np.integer):
+            rounded_labels = np.rint(labels)
+            if not np.allclose(labels, rounded_labels, rtol=0, atol=NIFTI_LABEL_TOLERANCE):
+                raise ValueError(
+                    "Segmentation labels must be finite integers "
+                    f"(allowed numerical error: {NIFTI_LABEL_TOLERANCE:g})"
+                )
+            # Normalize metadata only; keep the source and stored mask bytes intact.
+            labels = np.unique(rounded_labels)
         if not np.isfinite(image.affine).all():
             raise ValueError("NIfTI affine must be finite")
         spacing = [float(x) for x in image.header.get_zooms()[:3]]
@@ -36,7 +49,7 @@ def nifti_metadata(image_path: Path, mask_path: Path) -> dict:
             "shape": list(image.shape),
             "spacing": spacing,
             "affine": image.affine.tolist(),
-            "labels": [int(x) for x in np.unique(values)],
+            "labels": [int(x) for x in labels],
         }
     except (OSError, EOFError, nib.filebasedimages.ImageFileError) as exc:
         raise ValueError("Unreadable NIfTI file") from exc

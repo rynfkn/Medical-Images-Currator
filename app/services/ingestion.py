@@ -48,9 +48,12 @@ def ingest_nifti_dataset(db: Session, dataset: Dataset, root: Path, user: User) 
         base = case_directory(dataset, case)
         case.image_path = copy_file(db, image, f"{base}/image/image{suffix}")
         annotation_path = copy_file(db, mask, f"{base}/annotations/v0/segmentation{suffix}")
-        case.metadata_json = nifti_metadata(
-            get_file_path(case.image_path), get_file_path(annotation_path)
-        )
+        try:
+            case.metadata_json = nifti_metadata(
+                get_file_path(case.image_path), get_file_path(annotation_path)
+            )
+        except ValueError as exc:
+            raise ValueError(f"{image.name}: {exc}") from exc
         add_original(db, case, annotation_path, AnnotationFormat.NIFTI, user)
     return len(images)
 

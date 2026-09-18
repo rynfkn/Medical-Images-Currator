@@ -103,7 +103,11 @@ Supported combinations:
 **NIfTI:** put matched `.nii.gz` or `.nii` filenames in `images/` and `labels/`,
 such as `images/case_0001.nii.gz` and `labels/case_0001.nii.gz`. Files remain NIfTI.
 Validation checks readable 3D payloads, identical image/mask shapes, and finite
-integer mask labels. Metadata includes shape, voxel spacing, affine, and labels.
+integer mask labels. Floating-point labels within an absolute tolerance of `1e-6`
+of an integer are accepted to allow small numerical errors. Metadata label IDs
+are rounded to the nearest integer; source and stored annotation files remain
+byte-for-byte unchanged. Genuine fractional values, NaN, and infinity are rejected.
+Metadata includes shape, voxel spacing, affine, and labels.
 Shape agreement does not establish that a mask is anatomically aligned; spatial
 registration is outside this MVP.
 
