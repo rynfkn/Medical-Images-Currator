@@ -24,6 +24,7 @@ from app.services.storage import get_file_path, save_json
 from app.services.volume import (
     AXIS_NAMES,
     annotation_volume,
+    coco_categories,
     coco_payload,
     discard_work,
     extract,
@@ -72,8 +73,8 @@ def label_names(case: Case) -> dict[int, str]:
     """Names for every label value this case can hold, defaulting to 'Label N'."""
     values = [int(x) for x in case.metadata_json.get("labels", []) if int(x) > 0]
     categories = {
-        int(item["id"]): str(item.get("name") or f"Label {item['id']}")
-        for item in case.metadata_json.get("categories", [])
+        value: str(item.get("name") or f"Category {item['id']}")
+        for value, item in coco_categories(case.metadata_json.get("categories", [])).items()
     }
     stored = {
         int(value): str(name)
@@ -122,9 +123,12 @@ def image_slice(
     case, dataset = case_dataset(db, case_id)
     if dataset.image_format in (ImageFormat.PNG, ImageFormat.JPEG):
         # Keep raster cases lossless and in colour; there is nothing to window.
+        if axis != 2 or index != 0:
+            raise HTTPException(404, "Slice index out of range")
+        image_format = case.metadata_json.get("image_format", dataset.image_format.value)
         return Response(
             get_file_path(case.image_path).read_bytes(),
-            media_type=f"image/{dataset.image_format.value.lower()}",
+            media_type=f"image/{image_format.lower()}",
             headers={"Cache-Control": "private, max-age=600"},
         )
     volume, _ = image_volume(case, dataset)

@@ -1,11 +1,15 @@
 import io
+import json
 
 import nibabel as nib
 import numpy as np
+import pytest
 from conftest import create_dataset, ingest
 from PIL import Image
+from pycocotools import mask as coco_mask
 from pydicom.dataset import FileDataset, FileMetaDataset
 from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian, generate_uid
+from test_coco import coco_input
 
 from app.services.volume import extract, insert
 
@@ -63,6 +67,57 @@ def test_slice_extraction_is_reversible():
             insert(target, axis, index, plane)
             assert np.array_equal(extract(target, axis, index), plane)
             assert np.array_equal(np.take(target, index, axis), np.take(volume, index, axis))
+
+
+@pytest.mark.parametrize("kind", ["polygon", "uncompressed", "compressed"])
+@pytest.mark.parametrize("category_id", [1, 0, 300])
+@pytest.mark.parametrize("image_format", ["PNG", "JPEG"])
+def test_coco_viewer_and_saved_mask_round_trip(env, kind, category_id, image_format):
+    client, settings, users, _ = env
+    root = settings.import_dir / "coco"
+    expected = np.zeros((6, 8), dtype=np.uint8)
+    expected[1:4, 1:4] = 1
+    segmentation = None
+    if kind == "compressed":
+        segmentation = coco_mask.encode(np.asfortranarray(expected))
+        segmentation["counts"] = segmentation["counts"].decode("ascii")
+    elif kind == "uncompressed":
+        segmentation = {"size": [6, 8], "counts": [7, 3, 3, 3, 3, 3, 26]}
+    document = coco_input(root, segmentation)
+    document["categories"][0]["id"] = category_id
+    document["annotations"][0]["category_id"] = category_id
+    if image_format == "JPEG":
+        Image.new("RGB", (8, 6), "red").save(root / "images/image_0001.jpg")
+        document["images"][0]["file_name"] = "image_0001.jpg"
+    (root / "annotations/instances.json").write_text(json.dumps(document))
+    dataset_id = create_dataset(client, users["admin"], "COCO")
+    response = ingest(client, users["admin"], dataset_id, root, "COCO")
+    assert response.status_code == 201, response.text
+    case = client.get(f"/api/v1/datasets/{dataset_id}/cases", headers=users["doctor"]).json()[0]
+    base = f"/api/v1/viewer/cases/{case['id']}"
+    info = client.get(base, headers=users["doctor"])
+    assert info.status_code == 200, info.text
+    assert info.json()["labels"] == [{"value": 1, "name": "tumor"}]
+    image = client.get(f"{base}/slice/2/0", headers=users["doctor"])
+    assert image.status_code == 200
+    assert image.headers["content-type"] == f"image/{image_format.lower()}"
+    with Image.open(io.BytesIO(image.content)) as pixels:
+        assert pixels.size == (8, 6)
+    original = client.get(case["annotation_url"], headers=users["doctor"]).content
+    assert np.array_equal(
+        png_plane(client.get(f"{base}/mask/2/0", headers=users["doctor"])), expected
+    )
+    expected[5, 7] = 1
+    assert paint(client, users, case["id"], 2, 0, expected).status_code == 204
+    saved = client.post(f"{base}/save", headers=users["doctor"])
+    assert saved.status_code == 201, saved.text
+    assert np.array_equal(
+        png_plane(client.get(f"{base}/mask/2/0", headers=users["doctor"])), expected
+    )
+    exported = json.loads((settings.data_dir / saved.json()["annotation_path"]).read_text())
+    assert exported["categories"] == document["categories"]
+    assert exported["annotations"][0]["category_id"] == category_id
+    assert client.get(case["annotation_url"], headers=users["doctor"]).content == original
 
 
 def test_viewer_reports_ras_geometry(env):

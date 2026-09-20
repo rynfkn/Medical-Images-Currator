@@ -30,7 +30,7 @@ from PIL import Image, UnidentifiedImageError
 from pycocotools import mask as coco_mask
 
 from app.models import AnnotationFormat, AnnotationVersion, Case, Dataset, ImageFormat
-from app.services.annotation import read_json
+from app.services.annotation import read_json, rle_counts
 from app.services.storage import get_file_path
 
 # Orientation of an array that is already in RAS order.
@@ -226,18 +226,38 @@ def image_volume(case: Case, dataset: Dataset) -> tuple[np.memmap, dict]:
     return volume, meta
 
 
+def coco_categories(categories: list[dict]) -> dict[int, dict]:
+    """Map viewer labels to original categories; zero is reserved for background."""
+    if len(categories) > 255:
+        raise HTTPException(422, "The segmentation viewer supports at most 255 COCO categories")
+    mapped = {int(item["id"]): item for item in categories if 1 <= int(item["id"]) <= 255}
+    available = iter(value for value in range(1, 256) if value not in mapped)
+    for item in sorted(categories, key=lambda item: int(item["id"])):
+        if not 1 <= int(item["id"]) <= 255:
+            mapped[next(available)] = item
+    return dict(sorted(mapped.items()))
+
+
 def rasterize_coco(document: dict, shape: tuple[int, ...]) -> np.ndarray:
-    """Paint COCO annotations into a single-slice label volume keyed by category ID."""
+    """Paint COCO annotations into a single-slice volume using viewer label IDs."""
     height, width = document["image"]["height"], document["image"]["width"]
     canvas = np.zeros((height, width), dtype=np.uint8)
+    labels = {
+        int(item["id"]): value for value, item in coco_categories(document["categories"]).items()
+    }
     for annotation in document.get("annotations", []):
-        label = min(max(int(annotation["category_id"]), 0), 255)
+        label = labels[int(annotation["category_id"])]
         segmentation = annotation["segmentation"]
         if isinstance(segmentation, list):
             encoded = coco_mask.merge(coco_mask.frPyObjects(segmentation, height, width))
         else:
             encoded = coco_mask.frPyObjects(
-                {"size": [height, width], "counts": segmentation["counts"]}, height, width
+                {
+                    "size": [height, width],
+                    "counts": rle_counts(segmentation["counts"], height * width),
+                },
+                height,
+                width,
             )
         canvas[coco_mask.decode(encoded).astype(bool)] = label
     volume = canvas[::-1, ::-1].T[..., None]
@@ -252,7 +272,9 @@ def annotation_volume(
     """Return the cached RAS label volume for an annotation version, or None."""
     if annotation is None or annotation.format == AnnotationFormat.NONE:
         return None
-    relative = f"{viewer_dir(case)}/mask-{annotation.id}.u8"
+    # Previous COCO caches clamped category IDs, losing zero and merging IDs >255.
+    suffix = "-coco-v2" if annotation.format == AnnotationFormat.COCO else ""
+    relative = f"{viewer_dir(case)}/mask-{annotation.id}{suffix}.u8"
     if get_file_path(relative).is_file():
         return mapped(relative, shape, np.uint8)
     if annotation.format == AnnotationFormat.COCO:
@@ -353,13 +375,16 @@ def coco_payload(labels, parent: dict, names: dict[int, str] | None = None) -> b
     """Serialize a single-slice label volume as one COCO RLE annotation per category."""
     plane = np.asarray(labels[:, :, 0]).T[::-1, ::-1]
     annotations = []
+    category_map = coco_categories(parent["categories"])
     for label in (int(value) for value in np.unique(plane) if value):
+        if label not in category_map:
+            raise HTTPException(422, "Use the existing COCO categories when painting this case")
         encoded = coco_mask.encode(np.asfortranarray((plane == label).astype(np.uint8)))
         annotations.append(
             {
                 "id": len(annotations) + 1,
                 "image_id": parent["image"]["id"],
-                "category_id": label,
+                "category_id": category_map[label]["id"],
                 "segmentation": {
                     "size": [int(x) for x in encoded["size"]],
                     "counts": encoded["counts"].decode("ascii"),
@@ -369,8 +394,11 @@ def coco_payload(labels, parent: dict, names: dict[int, str] | None = None) -> b
                 "iscrowd": 0,
             }
         )
+    category_names = {
+        int(item["id"]): (names or {}).get(value) for value, item in category_map.items()
+    }
     categories = [
-        {**category, "name": (names or {}).get(int(category["id"]), category.get("name", ""))}
+        {**category, "name": category_names[int(category["id"])] or category.get("name", "")}
         for category in parent["categories"]
     ]
     document = {"image": parent["image"], "annotations": annotations, "categories": categories}
