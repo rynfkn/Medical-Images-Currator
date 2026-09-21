@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models import AnnotationFormat, CaseStatus, Decision, Dimension, ImageFormat, Role
 
@@ -114,6 +114,11 @@ class ViewerAxis(BaseModel):
 class ViewerLabel(BaseModel):
     value: int = Field(ge=1, le=255)
     name: str = Field(min_length=1, max_length=60)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def trim_name(cls, value):
+        return value.strip() if isinstance(value, str) else value
 
 
 class LabelNames(BaseModel):

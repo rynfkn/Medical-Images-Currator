@@ -62,9 +62,33 @@ docker compose exec backend python -m app.cli doctor --full-name 'Doctor' --role
 ```
 
 For a local installation, use `python -m app.cli ...` with the same arguments.
-Administrators can create and ingest datasets. All authenticated users can read
+Administrators can create, ingest, and delete datasets and individual cases.
+All authenticated users can read
 datasets, access files, upload corrections, and review cases. Only a review's
 author can submit it.
+
+### Project, data, and label management
+
+- `DELETE /api/v1/datasets/{dataset_id}` removes a project and its cases,
+  annotation versions, and reviews. Admin only.
+- `DELETE /api/v1/cases/{case_id}` removes one case and its annotation versions
+  and reviews. Admin only. Other cases and shared COCO source documents remain.
+- Both deletion endpoints return `204`. Managed images, annotations, viewer caches,
+  and reviewer drafts are removed after the database transaction commits.
+  Import source files are untouched. A filesystem cleanup failure is logged for
+  operator retry; the database deletion remains committed.
+- `POST /api/v1/viewer/cases/{case_id}/labels` accepts
+  `{"labels":[{"value":2,"name":"Kidney"}]}`. Names are trimmed and must contain
+  1–60 characters. Names are stored on the case and included in future exports.
+- `DELETE /api/v1/viewer/cases/{case_id}/labels/{value}` clears that numeric label
+  from every slice in the current user's segmentation draft. Save segmentation
+  commits the change as a new version; discard restores the saved segmentation.
+  Earlier versions are preserved. COCO category IDs remain in the export schema
+  to preserve their mapping; deleted labels have no annotations and are hidden
+  from the viewer's label list. Label edits respect another reviewer's open review.
+
+Project and case deletion is permanent. The frontend asks for confirmation before
+calling these endpoints.
 
 Login uses OAuth2 form fields (also supported by the **Authorize** button in `/docs`):
 

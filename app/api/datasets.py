@@ -3,18 +3,32 @@ from pathlib import Path
 from typing import Annotated
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Query, Response, UploadFile
 from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.security import Admin, CurrentUser
 from app.db import Db
-from app.models import AnnotationFormat, Dataset, ImageFormat
+from app.models import AnnotationFormat, Case, Dataset, ImageFormat
 from app.schemas import DatasetCreate, DatasetOut, IngestRequest
+from app.services.deletion import delete_cases, remove_managed_directory
 from app.services.ingestion import ingest_coco_dataset, ingest_dicom_dataset, ingest_nifti_dataset
 from app.services.storage import import_path
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
+
+
+@router.delete("/{dataset_id}", status_code=204)
+def delete_dataset(dataset_id: UUID, db: Db, user: Admin, cleanup: BackgroundTasks):
+    dataset = db.scalar(select(Dataset).where(Dataset.id == dataset_id).with_for_update())
+    if dataset is None:
+        raise HTTPException(404, "Dataset not found")
+    case_ids = list(db.scalars(select(Case.id).where(Case.dataset_id == dataset_id)))
+    delete_cases(db, case_ids)
+    db.delete(dataset)
+    db.flush()
+    cleanup.add_task(remove_managed_directory, str(dataset_id))
+    return Response(status_code=204)
 
 
 @router.post("", response_model=DatasetOut, status_code=201)

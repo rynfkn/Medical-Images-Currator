@@ -6,10 +6,11 @@ committed by an explicit save.
 """
 
 import io
+import json
 from uuid import UUID
 
 import numpy as np
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, Response
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Path, Query, Request, Response
 from PIL import Image, UnidentifiedImageError
 from sqlalchemy import select
 from starlette.datastructures import UploadFile
@@ -35,6 +36,7 @@ from app.services.volume import (
     open_work,
     plane_spacing,
     png_bytes,
+    work_dir,
     work_state,
 )
 
@@ -69,7 +71,7 @@ def axis_info(meta: dict, axis: int) -> dict:
     }
 
 
-def label_names(case: Case) -> dict[int, str]:
+def label_names(case: Case, draft: dict | None = None) -> dict[int, str]:
     """Names for every label value this case can hold, defaulting to 'Label N'."""
     values = [int(x) for x in case.metadata_json.get("labels", []) if int(x) > 0]
     categories = {
@@ -82,8 +84,12 @@ def label_names(case: Case) -> dict[int, str]:
         if str(value).isdigit()
     }
     values = sorted(set(values) | set(categories) | set(stored)) or [1, 2, 3]
+    deleted = set(case.metadata_json.get("deleted_labels", []))
+    deleted.update((draft or {}).get("deleted_labels", []))
     return {
-        value: stored.get(value) or categories.get(value) or f"Label {value}" for value in values
+        value: stored.get(value) or categories.get(value) or f"Label {value}"
+        for value in values
+        if value not in deleted
     }
 
 
@@ -100,7 +106,7 @@ def viewer_info(case_id: UUID, db: Db, user: CurrentUser):
         level=meta["level"],
         width=meta["width"],
         range=meta["range"],
-        labels=[{"value": value, "name": name} for value, name in label_names(case).items()],
+        labels=[{"value": value, "name": name} for value, name in label_names(case, draft).items()],
         annotation_format=dataset.annotation_format,
         editable=dataset.annotation_format != AnnotationFormat.NONE,
         has_mask=annotation is not None,
@@ -201,7 +207,8 @@ def save_draft(case_id: UUID, db: Db, user: CurrentUser, cleanup: BackgroundTask
     if draft is None:
         raise HTTPException(409, "There are no unsaved segmentation changes")
     parent = current_annotation(db, case.id)
-    names = label_names(case)
+    state = work_state(case, user.id) or {}
+    names = label_names(case, state)
     if dataset.annotation_format == AnnotationFormat.COCO:
         if parent is None:
             raise HTTPException(422, "COCO corrections need the original annotation")
@@ -213,6 +220,12 @@ def save_draft(case_id: UUID, db: Db, user: CurrentUser, cleanup: BackgroundTask
     del draft
     upload = UploadFile(file=io.BytesIO(payload), filename=filename, size=len(payload))
     annotation = create_correction(db, case, user, upload)
+    if state.get("deleted_labels"):
+        metadata = dict(case.metadata_json)
+        metadata["deleted_labels"] = sorted(
+            set(metadata.get("deleted_labels", [])) | set(state["deleted_labels"])
+        )
+        case.metadata_json = metadata
     if dataset.annotation_format != AnnotationFormat.COCO:
         # A NIfTI mask only stores numbers, so the names travel in a sidecar file.
         save_json(
@@ -240,6 +253,8 @@ def discard_draft(case_id: UUID, db: Db, user: CurrentUser):
 def rename_labels(case_id: UUID, body: LabelNames, db: Db, user: CurrentUser):
     """Name the numeric label values; the names are saved with the next version."""
     case = require_case(db, case_id, lock=True)
+    if db.get(Dataset, case.dataset_id).annotation_format == AnnotationFormat.NONE:
+        raise HTTPException(422, "This case does not support segmentation editing")
     if len({item.value for item in body.labels}) != len(body.labels):
         raise HTTPException(422, "Label values must be unique")
     draft = db.scalar(
@@ -248,7 +263,59 @@ def rename_labels(case_id: UUID, body: LabelNames, db: Db, user: CurrentUser):
     if draft and draft.reviewer_id != user.id:
         raise HTTPException(409, "Another reviewer is reviewing this case")
     metadata = dict(case.metadata_json)
-    metadata["label_names"] = {str(item.value): item.name.strip() for item in body.labels}
+    metadata["label_names"] = {
+        **metadata.get("label_names", {}),
+        **{str(item.value): item.name for item in body.labels},
+    }
+    metadata["deleted_labels"] = [
+        value
+        for value in metadata.get("deleted_labels", [])
+        if value not in {item.value for item in body.labels}
+    ]
     case.metadata_json = metadata  # A new dict marks the JSON column as changed.
     db.flush()
-    return LabelNames(labels=[{"value": v, "name": n} for v, n in label_names(case).items()])
+    state = work_state(case, user.id)
+    if state and set(state.get("deleted_labels", [])) & {item.value for item in body.labels}:
+        state["deleted_labels"] = [
+            value
+            for value in state["deleted_labels"]
+            if value not in {item.value for item in body.labels}
+        ]
+        get_file_path(f"{work_dir(case, user.id)}/meta.json").write_text(json.dumps(state))
+    return LabelNames(labels=[{"value": v, "name": n} for v, n in label_names(case, state).items()])
+
+
+@router.delete("/labels/{value}", response_model=LabelNames)
+def delete_label(case_id: UUID, db: Db, user: CurrentUser, value: int = Path(ge=1, le=255)):
+    """Clear a label on every slice in the private draft; save/discard applies as usual."""
+    case = require_case(db, case_id, lock=True)
+    dataset = db.get(Dataset, case.dataset_id)
+    if dataset.annotation_format == AnnotationFormat.NONE:
+        raise HTTPException(422, "This case does not support segmentation editing")
+    review = db.scalar(
+        select(Review).where(Review.case_id == case.id, Review.submitted_at.is_(None))
+    )
+    if review and review.reviewer_id != user.id:
+        raise HTTPException(409, "Another reviewer is reviewing this case")
+    state = work_state(case, user.id)
+    if value not in label_names(case, state):
+        raise HTTPException(404, "Label not found")
+    _, meta = image_volume(case, dataset)
+    annotation = current_annotation(db, case.id)
+    state = state or {
+        "base_annotation_id": str(annotation.id) if annotation else None,
+        "base_version": annotation.version if annotation else None,
+    }
+    draft = open_work(case, user.id, meta["shape"], None)
+    if draft is None:
+        draft = open_work(
+            case, user.id, meta["shape"], annotation_volume(case, annotation, meta["shape"]), state
+        )
+    # Process one plane at a time to avoid allocating a whole-volume boolean mask.
+    for index in range(draft.shape[2]):
+        plane = draft[:, :, index]
+        plane[plane == value] = 0
+    draft.flush()
+    state["deleted_labels"] = sorted(set(state.get("deleted_labels", [])) | {value})
+    get_file_path(f"{work_dir(case, user.id)}/meta.json").write_text(json.dumps(state))
+    return LabelNames(labels=[{"value": v, "name": n} for v, n in label_names(case, state).items()])

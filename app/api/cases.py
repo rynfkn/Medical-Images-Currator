@@ -1,15 +1,29 @@
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.security import CurrentUser
+from app.core.security import Admin, CurrentUser
 from app.db import Db
 from app.models import AnnotationVersion, Case, CaseStatus, Dataset, ImageFormat
 from app.schemas import AnnotationOut, CaseOut, CaseSummary
+from app.services.deletion import delete_cases, remove_managed_directory
 
 router = APIRouter(tags=["cases"])
+
+
+@router.delete("/cases/{case_id}", status_code=204)
+def delete_case(case_id: UUID, db: Db, user: Admin, cleanup: BackgroundTasks):
+    case = require_case(db, case_id)
+    # Use the same dataset -> case lock order as project deletion and ingestion.
+    db.scalar(select(Dataset).where(Dataset.id == case.dataset_id).with_for_update())
+    case = require_case(db, case_id, lock=True)
+    directory = f"{case.dataset_id}/cases/{case.id}"
+    delete_cases(db, [case.id])
+    db.flush()
+    cleanup.add_task(remove_managed_directory, directory)
+    return Response(status_code=204)
 
 
 def require_case(db: Session, case_id: UUID, *, lock: bool = False) -> Case:
