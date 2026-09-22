@@ -11,7 +11,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().cors_origins,
     allow_credentials=False,  # Authentication uses explicit bearer headers, not cookies.
-    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "Range"],
     expose_headers=["Content-Disposition", "Content-Length", "Content-Range", "Accept-Ranges"],
 )
